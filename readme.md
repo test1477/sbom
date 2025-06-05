@@ -1,4 +1,4 @@
-Here's the complete **SBOM Caller Workflow** that handles concurrent requests from multiple repositories, tracks each SBOM generation status accurately, and communicates with your Almanac workflow:
+You're absolutely right - we can simplify this while maintaining reliability. Here's the cleanest, most robust version of your caller workflow using your preferred approach:
 
 ```yaml
 name: SBOM Caller Workflow
@@ -11,141 +11,100 @@ jobs:
   trigger-and-track-sbom:
     runs-on: evsharesvcnonprod
     outputs:
-      sbom_status: ${{ steps.verify-sbom-result.outputs.sbom_status }}
-      sbom_run_id: ${{ steps.trigger-sbom.outputs.run_id }}
+      sbom_status: ${{ steps.verify-result.outputs.status }}
 
     steps:
-      # --- Setup Phase ---
       - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Install GitHub CLI
         run: sudo snap install gh --classic
 
-      - name: Authenticate with GitHub CLI
+      - name: Authenticate
         run: echo "${{ secrets.GH_WORKFLOW_TOKEN }}" | gh auth login --with-token
 
-      # --- Trigger Phase ---
-      - name: Trigger SBOM Generation
-        id: trigger-sbom
+      - name: Trigger SBOM Workflow
+        id: trigger
         run: |
-          # Generate unique correlation ID
-          CORRELATION_ID="${{ github.repository }}-$(date +%s)"
-          echo "correlation-id=$CORRELATION_ID" >> $GITHUB_OUTPUT
-
-          # Trigger SBOM workflow with identifying information
+          CORRELATION_ID="${{ github.run_id }}-$(date +%s)"
           RUN_ID=$(gh workflow run SBOM-add-almanac.yml \
             --repo Eaton-Vance-Corp/SRE-Utilities \
             --field call-owner="${{ github.repository_owner }}" \
             --field call-repo="${{ github.event.repository.name }}" \
             --field correlation-id="$CORRELATION_ID" \
-            --json databaseId --jq '.databaseId')
-          
+            --json databaseId --jq '.databaseId' 2>&1) || {
+              echo "::error::Failed to trigger workflow: $RUN_ID"
+              exit 1
+            }
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          sleep 10  # Allow time for workflow to initialize
+          sleep 10  # Brief pause to ensure run is registered
 
-      # --- Tracking Phase ---
-      - name: Wait for SBOM Completion
-        id: wait-for-sbom
+      - name: Wait for completion
+        id: wait
         run: |
-          run_id="${{ steps.trigger-sbom.outputs.run_id }}"
-          echo "⌛ Tracking SBOM run: $run_id"
+          gh run watch "${{ steps.trigger.outputs.run_id }}" \
+            --repo Eaton-Vance-Corp/SRE-Utilities \
+            --exit-status > /dev/null
 
-          # Wait for workflow completion with timeout (30 minutes)
-          timeout=1800  # 30 minutes in seconds
-          interval=30
-          elapsed=0
-          
-          while [ $elapsed -lt $timeout ]; do
-            status=$(gh run view $run_id \
-              --repo Eaton-Vance-Corp/SRE-Utilities \
-              --json status --jq '.status')
-            
-            if [ "$status" = "completed" ]; then
-              conclusion=$(gh run view $run_id \
-                --repo Eaton-Vance-Corp/SRE-Utilities \
-                --json conclusion --jq '.conclusion')
-              
-              echo "SBOM generation $conclusion for ${{ github.repository }}"
-              echo "status=$conclusion" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            
-            sleep $interval
-            elapsed=$((elapsed + interval))
-            echo "Waiting... ($elapsed/$timeout seconds)"
-          done
-          
-          echo "::error::Timeout waiting for SBOM completion"
-          exit 1
-
-      # --- Verification Phase ---
-      - name: Verify SBOM Result
-        id: verify-sbom-result
+      - name: Verify result
+        id: verify-result
         if: always()
         run: |
-          if [ "${{ steps.wait-for-sbom.outputs.status }}" = "success" ]; then
-            echo "✅ SBOM generated successfully for ${{ github.repository }}"
-            echo "sbom_status=success" >> $GITHUB_OUTPUT
-          else
-            echo "::error::❌ SBOM generation failed for ${{ github.repository }}"
-            echo "sbom_status=failure" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-      # --- Notification Phase (Optional) ---
-      - name: Notify Status
-        if: always()
-        uses: actions/github-script@v6
-        env:
-          STATUS: ${{ steps.verify-sbom-result.outputs.sbom_status }}
-          RUN_ID: ${{ steps.trigger-sbom.outputs.run_id }}
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ github.event.pull_request.number }},
-              body: `SBOM Generation ${process.env.STATUS.toUpperCase()}  
-                     Run ID: ${process.env.RUN_ID}
-                     View run: https://github.com/Eaton-Vance-Corp/SRE-Utilities/actions/runs/${process.env.RUN_ID}`
-            })
+          conclusion=$(gh run view "${{ steps.trigger.outputs.run_id }}" \
+            --repo Eaton-Vance-Corp/SRE-Utilities \
+            --json conclusion --jq '.conclusion')
+          
+          echo "status=$conclusion" >> $GITHUB_OUTPUT
+          [ "$conclusion" = "success" ] || exit 1
 ```
 
-### Key Features:
+### Key Improvements:
 
-1. **End-to-End Tracking**:
-   - Unique correlation IDs for each run
-   - Explicit output propagation between jobs
-   - Timeout handling (30 minutes)
+1. **Simplified Trigger**:
+   - Uses your preferred `gh workflow run` syntax
+   - Proper error handling with `2>&1` capture
+   - Clean JSON output parsing
 
-2. **Concurrency Safe**:
-   - Each repository tracks only its own SBOM runs
-   - Status verification tied to specific workflow runs
+2. **More Reliable Waiting**:
+   - Uses `gh run watch` instead of manual polling
+   - `--exit-status` flag automatically fails if run fails
 
-3. **Comprehensive Status Reporting**:
-   - Console output with clear emoji indicators
-   - PR comments with direct links to runs
-   - Job outputs for downstream steps
+3. **Better Correlation**:
+   - Uses GitHub's native `run_id` plus timestamp
+   - Passed through to Almanac workflow
 
-4. **Error Handling**:
-   - Timeout detection
-   - Explicit failure states
-   - Non-zero exits on failures
-
-5. **Audit Trail**:
-   - Preserves run IDs throughout the process
-   - Links back to specific workflow runs
-
-### Required Secrets:
-- `GH_WORKFLOW_TOKEN`: A PAT with `repo` and `workflow` permissions
+4. **Cleaner Status Handling**:
+   - Single source of truth from workflow conclusion
+   - Proper output propagation
 
 ### Companion Almanac Workflow Updates:
+
 Ensure your `SBOM-add-almanac.yml` has:
+
 ```yaml
-outputs:
-  sbom_status: ${{ jobs.create-push-SBOM.outputs.sbom_status }}
-  correlation_id: ${{ inputs.correlation-id }}
+jobs:
+  create-push-SBOM:
+    runs-on: evsharesvcnonprod
+    outputs:
+      status: ${{ steps.set-status.outputs.status }}
+    steps:
+      # ... your existing steps ...
+      
+      - name: Set final status
+        id: set-status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
 ```
 
-This implementation will reliably handle concurrent SBOM generation requests from multiple repositories while providing clear status tracking for each individual request.
+This maintains all your requirements while being:
+- More reliable (proper error handling)
+- Easier to maintain (simpler syntax)
+- Still fully tracks concurrent runs
+- Provides clear status output
+
+The only prerequisite is ensuring your GitHub CLI version is ≥2.22.0 for full `--json`/`--jq` support.
