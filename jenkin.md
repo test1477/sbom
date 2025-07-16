@@ -1,4 +1,8 @@
-To determine build dependencies (like npm, NuGet, Maven, etc.) and package information from Jenkins jobs, we'll need to analyze the build configuration. Here's an enhanced Python script that detects build tools and dependencies:
+# Analyzing Jenkins Jobs Using Jenkinsfile in Delta Path
+
+For jobs configured with "Pipeline script from SCM" pointing to `jenkinsfilesDelta/`, we need to modify our approach to properly detect dependencies. Here's how to handle these cases:
+
+## Enhanced Python Script for Jenkinsfile Analysis
 
 ```python
 import requests
@@ -11,218 +15,205 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Jenkins configuration
-JENKINS_URL = 'https://delta-jenkins.com:8443'
+JENKINS_URL = 'https://delta-jenkins.eatonvance.com:8443'
 JENKINS_USER = 'your-username'
 JENKINS_API_TOKEN = 'your-api-token'
 VERIFY_SSL = False
+JENKINSFILES_BASE_PATH = 'jenkinsfilesDelta/'  # Update with your actual path
 
-def detect_build_tools(config_xml):
-    """Analyze job config XML to detect build tools and dependencies"""
-    tools = set()
-    dependencies = set()
-    
-    # Detect package managers
-    if '<command>npm' in config_xml or 'package.json' in config_xml:
-        tools.add('npm')
-    if '<command>nuget' in config_xml or '.nuspec' in config_xml:
-        tools.add('nuget')
-    if '<command>mvn' in config_xml or 'pom.xml' in config_xml:
-        tools.add('maven')
-    if '<command>gradle' in config_xml or 'build.gradle' in config_xml:
-        tools.add('gradle')
-    if '<command>pip' in config_xml or 'requirements.txt' in config_xml:
-        tools.add('pip')
-    if '<command>dotnet' in config_xml or '.csproj' in config_xml:
-        tools.add('dotnet')
-    
+def get_jenkinsfile_content(repo_url, file_path, auth):
+    """Retrieve Jenkinsfile content from repository"""
+    try:
+        # This needs to be adapted to your SCM (Git, SVN, etc.)
+        # Example for GitHub:
+        if 'github.com' in repo_url:
+            api_url = repo_url.replace('github.com', 'api.github.com/repos')
+            api_url = api_url.replace('tree/', '') + f"/contents/{file_path}"
+            response = requests.get(api_url, auth=auth, verify=VERIFY_SSL)
+            if response.status_code == 200:
+                return response.json().get('content', '')
+    except Exception as e:
+        print(f"Error fetching Jenkinsfile: {str(e)}")
+    return None
+
+def analyze_jenkinsfile(content):
+    """Analyze Jenkinsfile content for dependencies"""
+    findings = {
+        'build_tools': set(),
+        'dependencies': set(),
+        'upstream_triggers': set(),
+        'downstream_triggers': set()
+    }
+
+    # Detect build tools
+    if re.search(r'(npm|yarn|nuget|mvn|gradle|pip|dotnet)\s', content, re.IGNORECASE):
+        findings['build_tools'].update(re.findall(r'(npm|yarn|nuget|mvn|gradle|pip|dotnet)\s', content, re.IGNORECASE))
+
     # Detect dependency files
-    dependency_patterns = {
-        'package.json': 'npm',
-        'packages.config': 'nuget',
-        'pom.xml': 'maven',
-        'build.gradle': 'gradle',
-        'requirements.txt': 'pip',
-        '*.csproj': 'dotnet'
-    }
-    
-    for file, tool in dependency_patterns.items():
-        if file in config_xml:
-            tools.add(tool)
-    
-    return sorted(tools), sorted(dependencies)
+    dependency_files = re.findall(r'(package\.json|pom\.xml|build\.gradle|requirements\.txt|\.csproj|\.nuspec)', content)
+    if dependency_files:
+        findings['dependencies'].update(dependency_files)
 
-def get_job_config(job_url, auth):
-    """Get raw config.xml for a job"""
-    config_url = f"{job_url}config.xml"
-    try:
-        response = requests.get(config_url, auth=auth, verify=VERIFY_SSL, timeout=30)
-        response.raise_for_status()
-        return response.text
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching config for {job_url}: {str(e)}")
-        return None
+    # Detect upstream/downstream triggers
+    upstream = re.findall(r'upstream\s*\(.*?projects\s*:\s*\[?(.*?)\]?\)', content, re.IGNORECASE)
+    downstream = re.findall(r'downstream\s*\(.*?projects\s*:\s*\[?(.*?)\]?\)', content, re.IGNORECASE)
+    
+    for match in upstream:
+        findings['upstream_triggers'].update(re.findall(r'"([^"]+)"|\'([^\']+)\'|\[([^\]]+)\]', match))
+    for match in downstream:
+        findings['downstream_triggers'].update(re.findall(r'"([^"]+)"|\'([^\']+)\'|\[([^\]]+)\]', match))
 
-def get_job_details(job_url, auth):
-    """Enhanced job details including build tools"""
+    return findings
+
+def get_pipeline_job_details(job_url, auth):
+    """Get details for pipeline jobs using Jenkinsfile"""
     details = {
-        'build_tools': '',
-        'build_scripts': '',
-        'dependencies': ''
+        'build_tools': 'None',
+        'dependencies': 'None',
+        'upstream': 'None',
+        'downstream': 'None',
+        'jenkinsfile_path': 'None',
+        'scm_url': 'None'
     }
-    
-    config_xml = get_job_config(job_url, auth)
-    if config_xml:
-        tools, deps = detect_build_tools(config_xml)
-        details.update({
-            'build_tools': ', '.join(tools) if tools else 'None',
-            'dependencies': ', '.join(deps) if deps else 'None'
-        })
-        
-        # Detect build scripts
-        scripts = set()
-        if 'Jenkinsfile' in config_xml:
-            scripts.add('Jenkinsfile')
-        if 'build.sh' in config_xml:
-            scripts.add('build.sh')
-        if 'build.ps1' in config_xml:
-            scripts.add('build.ps1')
-        details['build_scripts'] = ', '.join(scripts) if scripts else 'None'
-    
-    return details
 
-def get_nested_jobs(folder_url, auth, base_path=""):
-    """Recursively get all jobs with build tool detection"""
-    jobs = []
-    folder_url = folder_url.rstrip('/')
-    
     try:
-        contents_url = f"{folder_url}/api/json?tree=jobs[name,url,color,_class]"
-        response = requests.get(contents_url, auth=auth, verify=VERIFY_SSL, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        for item in data['jobs']:
-            item_class = item.get('_class', '')
-            full_path = f"{base_path}/{item['name']}" if base_path else item['name']
+        # Get SCM configuration
+        config_url = f"{job_url}api/json?tree=actions[*]"
+        response = requests.get(config_url, auth=auth, verify=VERIFY_SSL)
+        if response.status_code == 200:
+            data = response.json()
             
-            if 'folder' in item_class.lower():
-                jobs.extend(get_nested_jobs(item['url'], auth, full_path))
-            else:
-                basic_info = {
-                    'full_name': full_path,
-                    'name': item['name'],
-                    'url': item['url'],
-                    'status': 'disabled' if item['color'] == 'disabled' else 'enabled'
-                }
-                
-                # Get standard details
-                std_details = get_standard_details(item['url'], auth)
-                
-                # Get build tool information
-                build_details = get_job_details(item['url'], auth)
-                
-                jobs.append({**basic_info, **std_details, **build_details})
-    except requests.exceptions.RequestException as e:
-        print(f"Error accessing folder {folder_url}: {str(e)}")
-    
-    return jobs
+            # Find SCM configuration
+            for action in data.get('actions', []):
+                if 'scm' in action:
+                    scm = action['scm']
+                    details['scm_url'] = scm.get('userRemoteConfigs', [{}])[0].get('url', 'None')
+                    details['jenkinsfile_path'] = scm.get('scriptPath', 'Jenkinsfile')
+                    
+                    # Only analyze if in our target path
+                    if details['jenkinsfile_path'].startswith(JENKINSFILES_BASE_PATH):
+                        content = get_jenkinsfile_content(details['scm_url'], details['jenkinsfile_path'], auth)
+                        if content:
+                            analysis = analyze_jenkinsfile(content)
+                            details.update({
+                                'build_tools': ', '.join(analysis['build_tools']) if analysis['build_tools'] else 'None',
+                                'dependencies': ', '.join(analysis['dependencies']) if analysis['dependencies'] else 'None',
+                                'upstream': ', '.join([x for t in analysis['upstream_triggers'] for x in t if x]) or 'None',
+                                'downstream': ', '.join([x for t in analysis['downstream_triggers'] for x in t if x]) or 'None'
+                            })
+    except Exception as e:
+        print(f"Error analyzing pipeline job {job_url}: {str(e)}")
 
-def get_standard_details(job_url, auth):
-    """Get standard job details"""
-    details_url = f"{job_url}api/json?tree=upstreamProjects[name],downstreamProjects[name],buildable,description"
-    try:
-        response = requests.get(details_url, auth=auth, verify=VERIFY_SSL, timeout=30)
-        response.raise_for_status()
-        details = response.json()
-        return {
-            'upstream': ', '.join([p['name'] for p in details.get('upstreamProjects', [])]),
-            'downstream': ', '.join([p['name'] for p in details.get('downstreamProjects', [])]),
-            'buildable': details.get('buildable', False),
-            'description': details.get('description', '')
-        }
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching standard details for {job_url}: {str(e)}")
-        return {
-            'upstream': '',
-            'downstream': '',
-            'buildable': False,
-            'description': ''
-        }
+    return details
 
 def main():
     auth = HTTPBasicAuth(JENKINS_USER, JENKINS_API_TOKEN)
     
     print(f"Fetching all jobs from {JENKINS_URL}...")
-    all_jobs = get_nested_jobs(JENKINS_URL, auth)
+    
+    # Get all jobs (you can reuse your existing function)
+    all_jobs = []  # Replace with your job collection logic
     
     # Prepare CSV output
-    csv_file = 'jenkins_job_inventory_with_build_tools.csv'
+    csv_file = 'jenkins_job_inventory_with_jenkinsfiles.csv'
     fieldnames = [
-        'full_name', 'name', 'url', 'status', 'buildable',
-        'description', 'build_tools', 'build_scripts', 
-        'dependencies', 'upstream', 'downstream'
+        'full_name', 'name', 'url', 'type', 'jenkinsfile_path', 'scm_url',
+        'build_tools', 'dependencies', 'upstream', 'downstream'
     ]
     
     with open(csv_file, mode='w', newline='', encoding='utf-8') as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         
-        for job in sorted(all_jobs, key=lambda x: x['full_name']):
-            writer.writerow(job)
+        for job in all_jobs:
+            if job.get('_class', '').endswith('WorkflowJob'):
+                details = get_pipeline_job_details(job['url'], auth)
+                writer.writerow({
+                    'full_name': job['full_name'],
+                    'name': job['name'],
+                    'url': job['url'],
+                    'type': 'Pipeline',
+                    **details
+                })
     
-    print(f"\nSuccessfully exported {len(all_jobs)} jobs to {csv_file}")
-    
-    # Print sample output
-    print("\nSample of exported data:")
-    sample = all_jobs[:3] if len(all_jobs) > 3 else all_jobs
-    for job in sample:
-        print(f"\nJob: {job['full_name']}")
-        print(f"Build Tools: {job['build_tools']}")
-        print(f"Build Scripts: {job['build_scripts']}")
-        print(f"Dependencies: {job['dependencies']}")
+    print(f"\nInventory saved to {csv_file}")
 
 if __name__ == "__main__":
     main()
 ```
 
-## Key Enhancements:
+## How to Verify in Jenkins UI
 
-1. **Build Tool Detection**:
-   - Detects npm, NuGet, Maven, Gradle, pip, and .NET Core
-   - Looks for both command usage and configuration files
+For jobs using `jenkinsfilesDelta/`, follow these steps:
 
-2. **Dependency File Detection**:
-   - Identifies package.json, packages.config, pom.xml, etc.
-   - Reports which dependency management system is used
+1. **Locate the Jenkinsfile**:
+   - Go to the job → Configure
+   - In "Pipeline" section, note the "Script Path" (e.g., `jenkinsfilesDelta/AladdinDataLoader.Jenkinsfile`)
 
-3. **Build Script Detection**:
-   - Identifies Jenkinsfile, build.sh, build.ps1
-   - Shows what kind of build scripts are used
+2. **Check SCM Configuration**:
+   - Under "Pipeline" section, see which repository contains the Jenkinsfile
+   - Note the branch specification
 
-4. **Enhanced CSV Output**:
+3. **View Dependency Triggers**:
+   - Look for these patterns in the Jenkinsfile:
+     ```groovy
+     triggers {
+         upstream(upstreamProjects: 'job1,job2', threshold: hudson.model.Result.SUCCESS)
+     }
+     ```
+     ```groovy
+     // Manual triggers
+     build job: 'downstream-job', parameters: [...]
+     ```
+
+4. **Check Build Tools**:
+   - Look for build tool commands in the Jenkinsfile:
+     ```groovy
+     steps {
+         sh 'npm install'
+         bat 'nuget restore'
+     }
+     ```
+
+## Common Dependency Patterns in Jenkinsfiles
+
+1. **Explicit Triggers**:
+   ```groovy
+   triggers {
+       upstream(upstreamProjects: 'pre-processor', threshold: hudson.model.Result.SUCCESS)
+   }
    ```
-   full_name,name,url,status,buildable,description,build_tools,build_scripts,dependencies,upstream,downstream
+
+2. **Build Steps**:
+   ```groovy
+   steps {
+       build job: 'deploy-prod', parameters: [...]
+   }
    ```
 
-## How It Works:
+3. **Parameterized Triggers**:
+   ```groovy
+   post {
+       success {
+           build job: 'notify-success', propagate: false
+       }
+   }
+   ```
 
-1. For each job, fetches the raw `config.xml`
-2. Analyzes the XML for:
-   - Package manager commands (npm, nuget, mvn, etc.)
-   - Dependency configuration files
-   - Build scripts
-3. Adds columns to the CSV reporting:
-   - `build_tools`: Detected package managers
-   - `build_scripts`: Build automation scripts found
-   - `dependencies`: Dependency files detected
+## Recommendations
 
-## Limitations:
+1. **For Accurate Dependency Mapping**:
+   - First run the script to identify all jobs using `jenkinsfilesDelta/`
+   - Then manually verify a sample of these jobs in UI
+   - Adjust the regex patterns in the script based on your actual Jenkinsfile patterns
 
-1. Can only detect what's visible in the job configuration
-2. For complex builds, might need manual verification
-3. Won't detect dependencies declared in external scripts
+2. **For Build Tool Detection**:
+   - The script looks for both:
+     - Direct commands in Jenkinsfile (`npm install`)
+     - Dependency files referenced (`package.json`)
 
-Would you like me to add any specific features:
-- Deeper analysis of package.json/pom.xml files?
-- Integration with dependency analysis tools?
-- More detailed build step analysis?
+3. **For SCM Access**:
+   - You may need to add SCM-specific authentication
+   - The script currently has basic GitHub support - extend for your SCM
+
+Would you like me to focus on any specific aspect of the Jenkinsfile analysis or dependency detection?
