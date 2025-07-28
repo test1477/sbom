@@ -1,17 +1,13 @@
-Great! Below is the **updated Python script** that fetches the **last deployment** for each project from **Octopus Deploy** and **writes the report to a CSV file**.
+Thanks! To **disable SSL verification** (i.e., set `verify=False` in all `requests.get()` calls), you can either:
+
+1. **Pass `verify=False` in every `requests.get()` call**, or
+2. **Use a session object and disable it globally.**
+
+I'll update the original CSV script with **option 1** (simplest):
 
 ---
 
-### ✅ Features:
-
-* Fetch all projects
-* Get the latest deployment per project
-* Collect: `project_name`, `environment`, `release_version`, `deployed_at`, and `deployment_status`
-* Export results to `last_deployments.csv`
-
----
-
-### ✅ Script: `last_deployment_report_csv.py`
+### ✅ Updated Script (with `verify=False` for SSL):
 
 ```python
 import requests
@@ -25,35 +21,36 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 CSV_FILE = "last_deployments.csv"
+VERIFY_SSL = False  # Set to False to disable SSL certificate verification
 
 def get_projects():
     url = f"{OCTOPUS_URL}/api/projects/all"
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url, headers=HEADERS, verify=VERIFY_SSL)
     response.raise_for_status()
     return response.json()
 
 def get_latest_deployment(project_id):
     url = f"{OCTOPUS_URL}/api/deployments?projects={project_id}&take=1&order=desc"
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url, headers=HEADERS, verify=VERIFY_SSL)
     response.raise_for_status()
     deployments = response.json().get("Items", [])
     return deployments[0] if deployments else None
 
 def get_release(release_id):
     url = f"{OCTOPUS_URL}/api/releases/{release_id}"
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url, headers=HEADERS, verify=VERIFY_SSL)
     response.raise_for_status()
     return response.json()
 
 def get_environment(env_id):
     url = f"{OCTOPUS_URL}/api/environments/{env_id}"
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url, headers=HEADERS, verify=VERIFY_SSL)
     response.raise_for_status()
     return response.json()
 
 def get_task_status(task_id):
     url = f"{OCTOPUS_URL}/api/tasks/{task_id}"
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url, headers=HEADERS, verify=VERIFY_SSL)
     response.raise_for_status()
     return response.json()
 
@@ -99,21 +96,8 @@ if __name__ == "__main__":
 
 ---
 
-### 📁 Output: `last_deployments.csv`
+### ⚠️ Note on `verify=False`:
 
-| project\_name | environment | release\_version | deployed\_at      | deployment\_status |
-| ------------- | ----------- | ---------------- | ----------------- | ------------------ |
-| Web API       | Production  | 2.1.0            | 2025-07-26T12:00Z | Success            |
-| Billing App   | Staging     | 3.5.2            | 2025-07-25T18:30Z | Failed             |
+Disabling SSL verification is insecure and should **only be used in internal/testing environments**. Avoid this in production unless absolutely necessary.
 
----
-
-### ✅ Optional Enhancements:
-
-Let me know if you'd like:
-
-* CSV with additional fields like `duration`, `deployed_by`
-* Filtering by environment or specific project
-* Sorting or multiple recent deployments
-
-Would you like to include any of these?
+Let me know if you want to switch to **option 2 (requests session with `verify=False`)** or also suppress **InsecureRequestWarning** logs.
