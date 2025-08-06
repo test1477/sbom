@@ -1,12 +1,17 @@
-To use the **`server_tasks` output** from `deploy-release-action@v2` and wait for deployment completion using **`await-task-action@v3`**, follow this structured workflow:
+This error occurs when GitHub Actions fails to parse the `server_tasks` output from the `deploy-release-action@v2` step as valid JSON. Let's fix this step-by-step.
 
----
+### Root Cause
+The error suggests either:
+1. The `server_tasks` output is empty/malformed
+2. The JSON parsing syntax is incorrect
+3. The deployment step failed before producing output
 
-### **Step-by-Step Workflow**
-#### **1. Deploy a Release & Capture `server_tasks`**
+### Corrected Solution
+
+#### 1. First, ensure the deployment step succeeds and captures output:
 ```yaml
-- name: Deploy Release in Octopus 🚀
-  id: deploy_release  # Assign an ID to reference outputs later
+- name: Deploy Release
+  id: deploy_step
   uses: OctopusDeploy/deploy-release-action@v2
   env:
     OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
@@ -15,74 +20,65 @@ To use the **`server_tasks` output** from `deploy-release-action@v2` and wait fo
     space: 'Your-Space'
     project: 'Your-Project'
     release_number: '1.0.0'
-    environments: 'Production'  # Comma-separated for multiple environments
+    environments: 'Production'
 ```
 
-#### **2. Wait for Deployment Completion Using `await-task-action`**
+#### 2. Debug the output before using it:
 ```yaml
-- name: Await Octopus Deployment Completion ⏳
+- name: Debug Output
+  run: |
+    echo "Raw server_tasks output:"
+    echo '${{ steps.deploy_step.outputs.server_tasks }}'
+    
+    echo "Formatted output:"
+    echo '${{ steps.deploy_step.outputs.server_tasks }}' | jq .
+```
+
+#### 3. Safely handle the JSON output:
+```yaml
+- name: Await Deployment
   uses: OctopusDeploy/await-task-action@v3
   env:
     OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
     OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
-    OCTOPUS_SPACE: 'Your-Space'
   with:
-    # Extract the first serverTaskId from the JSON output
-    server_task_id: ${{ fromJson(steps.deploy_release.outputs.server_tasks)[0].serverTaskId }}
+    server_task_id: ${{ fromJson(steps.deploy_step.outputs.server_tasks)[0].serverTaskId }}
 ```
 
----
+### Key Fixes:
+1. **Verify the deployment step succeeds** before using outputs
+2. **Add debugging** to inspect the raw output
+3. **Use proper JSON parsing** with `fromJson`
 
-### **Key Details**
-1. **`server_tasks` Output** (from `deploy-release-action@v2`):
-   - Returns a **JSON array** of objects like:
-     ```json
-     [
-       { "serverTaskId": "ServerTasks-123", "environmentName": "Production" },
-       { "serverTaskId": "ServerTasks-456", "environmentName": "Staging" }
-     ]
-     ```
-   - Accessible via `steps.[DEPLOY_STEP_ID].outputs.server_tasks`.
+### Fallback Option
+If you're still having issues, use this more robust approach:
 
-2. **`await-task-action@v3`**:
-   - Waits for the specified `server_task_id` to complete.
-   - Fails the job if the Octopus task fails.
-
----
-
-### **Advanced Use Cases**
-#### **Wait for Multiple Environments**
-If you deploy to multiple environments (e.g., `Production,Staging`), loop through `server_tasks`:
 ```yaml
-- name: Await All Deployments
+- name: Get Task ID
+  id: get_task
   run: |
-    TASKS='${{ steps.deploy_release.outputs.server_tasks }}'
-    for task in $(echo "$TASKS" | jq -r '.[].serverTaskId'); do
-      echo "Waiting for task: $task"
-      octo wait-for-task --task-id="$task" --server="$OCTOPUS_URL" --apiKey="$OCTOPUS_API_KEY"
-    done
-  env:
-    OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
-    OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+    # Get the raw output
+    RAW_OUTPUT='${{ steps.deploy_step.outputs.server_tasks }}'
+    
+    # Verify it's not empty
+    if [ -z "$RAW_OUTPUT" ] || [ "$RAW_OUTPUT" == "null" ]; then
+      echo "::error::No server_tasks output received"
+      exit 1
+    fi
+    
+    # Parse JSON safely
+    TASK_ID=$(echo "$RAW_OUTPUT" | jq -r '.[0].serverTaskId')
+    echo "task_id=$TASK_ID" >> $GITHUB_OUTPUT
+
+- name: Await Deployment
+  uses: OctopusDeploy/await-task-action@v3
+  with:
+    server_task_id: ${{ steps.get_task.outputs.task_id }}
 ```
 
-#### **Extract Deployment Status**
-```yaml
-- name: Log Deployment Status
-  run: |
-    TASK_ID=${{ fromJson(steps.deploy_release.outputs.server_tasks)[0].serverTaskId }}
-    STATUS=$(octo get-task --task-id="$TASK_ID" --server="$OCTOPUS_URL" --apiKey="$OCTOPUS_API_KEY" --format=json | jq -r '.State')
-    echo "Deployment Status: $STATUS"
-```
+This provides better error handling and debugging capabilities. The error typically occurs when:
+- The deployment fails silently
+- The output format changed
+- There's a permissions issue
 
----
-
-### **Troubleshooting**
-- **Error**: `Invalid server_task_id`  
-  → Verify the JSON path: `steps.[STEP_ID].outputs.server_tasks` must be valid.
-- **Error**: `Task failed in Octopus`  
-  → Check the Octopus Deploy task logs for details.
-
----
-
-This approach ensures **real-time tracking** of Octopus deployments in GitHub Actions. Let me know if you need help customizing it further! 🎯
+Would you like me to help troubleshoot any specific part of your workflow?
