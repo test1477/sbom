@@ -1,31 +1,61 @@
-Perfect 👍 thanks for clarifying.
+Thanks for pasting your full workflow 👌 — I see a few issues that are making it behave oddly and always “PASS”:
 
-So we need:
+---
 
-1. **Security tab integration** → this requires **GitHub Advanced Security (GHAS)** to be enabled at org or repo level. Otherwise CodeQL results **will not show up in the Security tab**.
-2. **Language auto-detection** → CodeQL can detect the language(s) of a repo automatically, so you don’t need to hardcode a matrix for every language.
+### 🔎 Problems in the YAML you pasted
 
-Here’s a **consolidated workflow** that will:
+1. **YAML formatting/indentation** is broken (steps don’t have `- name:` etc., env block has typos).
+2. `languages: auto` isn’t valid → you correctly switched to a `matrix`.
+3. You’re running `github/codeql-action/analyze@v3` (good) but then **adding a shell step** that only echoes text, and never fails the job.
+4. SARIF upload is already done by the `analyze@v3` action — your manual SARIF checks aren’t needed unless you want to block PRs.
 
-* Run **CodeQL scanning** (auto-detects repo language(s))
-* Run **Dependency Review**
-* Trigger on **PRs to the default branch**
-* Upload results to the **Security tab** (requires GHAS)
+---
+
+### ✅ Fixed + Improved Workflow
+
+Here’s a clean version that:
+
+* Runs on `push` and `pull_request` to `main`.
+* Runs **Java + Python** CodeQL analysis in matrix.
+* Uploads results to **Security → Code scanning alerts** automatically.
+* Adds a **custom check step** that blocks the PR if **high/critical vulnerabilities** are found.
 
 ```yaml
 name: Security Scan (CodeQL + Dependency Review)
 
 on:
+  push:
+    branches: [ main ]
   pull_request:
-    branches:
-      - $default-branch   # Runs only on PRs to the default branch
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      octopus_deployment_id:
+        description: 'Octopus Deploy Deployment ID'
+        required: false
+        type: string
+      change_request_id:
+        description: 'Cherwell Change Request ID'
+        required: false
+        type: string
+
+env:
+  OCTOPUS_DEPLOYMENT_ID: ${{ github.event.inputs.octopus_deployment_id || 'manual-trigger' }}
+  CHANGE_REQUEST_ID: ${{ github.event.inputs.change_request_id || 'unknown' }}
 
 jobs:
   codeql:
-    name: CodeQL Analysis
+    name: CodeQL Analysis (${{ matrix.language }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: true
+      matrix:
+        language: [ 'java', 'python' ]
+        # CodeQL also supports: cpp, csharp, go, javascript, ruby
+
     permissions:
-      security-events: write     # needed for Security tab
+      security-events: write   # needed for Security tab
       actions: read
       contents: read
 
@@ -36,42 +66,49 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          languages: auto    # Auto-detects languages in the repo
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
-
-  dependency-review:
-    name: Dependency Review
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write  # annotates PR with issues
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Dependency Review
-        uses: actions/dependency-review-action@v4
         with:
-          fail-on-severity: high    # block PRs with high severity vulnerabilities
+          category: "/language:${{ matrix.language }}"
+          output: results
+
+      # Custom check for high/critical vulnerabilities
+      - name: Check for High/Critical Vulnerabilities
+        run: |
+          SARIF_FILES=$(find results -name "*.sarif" 2>/dev/null || true)
+          if [ -n "$SARIF_FILES" ]; then
+            echo "SARIF results found: $SARIF_FILES"
+
+            # Count only "error" severity (high/critical)
+            alerts=$(jq '[.runs[].results[] 
+                          | select(.level == "error")] 
+                          | length' $SARIF_FILES)
+
+            echo "High/Critical vulnerabilities detected: $alerts"
+
+            if [ "$alerts" -gt 0 ]; then
+              echo "Blocking PR because high/critical vulnerabilities were found"
+              exit 1
+            fi
+          else
+            echo "No SARIF files found – check CodeQL job setup"
+          fi
 ```
 
 ---
 
-### 🔑 Key Points
+### 🔐 Behavior
 
-* `languages: auto` makes CodeQL detect **only the languages present** (so if repo has Python → it scans only Python).
-* With **GHAS enabled**, results from `analyze` will appear in the **Security tab** + inline PR checks.
-* Without GHAS, results are only visible in the workflow logs/artifacts.
-* Dependency Review runs regardless of GHAS, since it’s free.
+* **Security tab** → always shows all results.
+* **PR checks** → will go red **only if High/Critical vulnerabilities are detected**.
+* **Low/Medium** → still reported in Security tab, but workflow won’t block merge.
 
 ---
 
-👉 Since you want to **roll this out org-wide**, I can show you how to make it a **reusable workflow** (defined once in your `.github` org repo and referenced by all repos), so you don’t have to maintain the YAML in every repo.
-
-Do you want me to prepare the **reusable workflow version** for org rollout?
+👉 Do you also want me to fold **Dependency Review** (for third-party libs) into this same workflow so you have a single consolidated pipeline, or keep CodeQL and Dependency Review as separate jobs?
